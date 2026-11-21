@@ -1,0 +1,33 @@
+{
+  "name": "agenteda",
+  "module": "index.ts",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "typecheck": "bun check"
+  },
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
+  "peerDependencies": {
+    "typescript": "^7"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "@tscircuit/checks": "^0.0.283",
+    "@tscircuit/core": "^0.0.2448",
+    "@tscircuit/runframe": "^0.0.3314",
+    "circuit-json": "^0.0.559",
+    "circuit-json-to-bom-csv": "^0.0.28",
+    "circuit-json-to-gerber": "^0.0.124",
+    "circuit-json-to-gltf": "^0.0.168",
+    "circuit-json-to-kicad": "^0.0.280",
+    "circuit-json-to-pnp-csv": "^0.0.23",
+    "circuit-to-svg": "^0.0.462",
+    "easyeda": "^0.0.391",
+    "jszip": "^3.10.2",
+    "react": "^19.3.1",
+    "tscircuit": "^0.0.3270",
+    "zod": "3"
+  }
+}

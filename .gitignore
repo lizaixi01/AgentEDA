@@ -1,0 +1,8 @@
+node_modules
+.DS_Store
+scratch/
+projects/*/.aeda/
+.aeda-config.json
+web/dist
+web/node_modules
+*.log
