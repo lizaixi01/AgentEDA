@@ -1,19 +1,28 @@
 {
   "name": "agenteda",
-  "module": "index.ts",
   "type": "module",
   "private": true,
   "scripts": {
-    "typecheck": "bun check"
+    "dev": "bun run --watch src/server.ts",
+    "start": "bun run src/server.ts",
+    "mcp": "bun run src/mcp.ts",
+    "aeda": "bun run src/cli.ts",
+    "build:web": "cd web && bun install && bun run build",
+    "typecheck": "tsc --noEmit -p .",
+    "test": "bun test tests"
   },
   "devDependencies": {
-    "@types/bun": "latest"
+    "@types/bun": "^1.4.5",
+    "@types/react": "^19.3.0",
+    "typescript": "^7.0.2"
   },
   "peerDependencies": {
     "typescript": "^7"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^1.12.0",
     "@modelcontextprotocol/sdk": "^1.32.2",
+    "@resvg/resvg-js": "^2.6.2",
     "@tscircuit/checks": "^0.0.283",
     "@tscircuit/core": "^0.0.2448",
     "@tscircuit/runframe": "^0.0.3314",
@@ -23,11 +32,17 @@
     "circuit-json-to-gltf": "^0.0.168",
     "circuit-json-to-kicad": "^0.0.280",
     "circuit-json-to-pnp-csv": "^0.0.23",
+    "circuit-json-to-step": "^0.0.63",
     "circuit-to-svg": "^0.0.462",
     "easyeda": "^0.0.391",
     "jszip": "^3.10.2",
+    "pcb-stackup": "^4.2.8",
     "react": "^19.3.1",
     "tscircuit": "^0.0.3270",
     "zod": "3"
+  },
+  "version": "0.1.0",
+  "bin": {
+    "aeda": "src/cli.ts"
   }
 }

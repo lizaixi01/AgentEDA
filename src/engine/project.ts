@@ -67,7 +67,8 @@ export function safePath(id: string, rel: string): string {
   const full = path.resolve(dir, rel)
   if (full !== dir && !full.startsWith(dir + path.sep))
     throw new EdaError("bad_path", `Path "${rel}" escapes the project folder`)
-  if (path.relative(dir, full).split(path.sep)[0] === ".aeda")
+  // Compared case-insensitively: the default macOS filesystem treats ".AEDA" as the same folder.
+  if (path.relative(dir, full).split(path.sep)[0]?.toLowerCase() === ".aeda")
     throw new EdaError("bad_path", `".aeda" holds generated build output and is read-only`)
   return full
 }
@@ -77,19 +78,67 @@ const STARTER = `// Entry file: default-export a <board>. Units are mm; board ce
 export default () => (
   <board width="20mm" height="15mm">
     <resistor name="R1" resistance="1k" footprint="0402" />
-    <led name="D1" color="red" footprint="0603" />
+    <led name="D1" color="red" footprint="0603" supplierPartNumbers={{ jlcpcb: ["C2286"] }} />
     <pinheader name="J1" pinCount={2} pitch="2.54mm" pinLabels={["VCC", "GND"]} />
 
-    <trace from=".J1 > .VCC" to=".R1 > .pin1" />
-    <trace from=".R1 > .pin2" to=".D1 > .anode" />
-    <trace from=".D1 > .cathode" to=".J1 > .GND" />
+    <trace from="J1.VCC" to="R1.pin1" />
+    <trace from="R1.pin2" to="D1.anode" />
+    <trace from="D1.cathode" to="J1.GND" />
   </board>
 )
 `
 
-export async function createProject(opts: { name: string; description?: string; code?: string; id?: string }) {
+// ---- templates -------------------------------------------------------------
+
+export const TEMPLATES_DIR = path.join(ROOT, "templates")
+
+export interface TemplateInfo {
+  id: string
+  name: string
+  description: string
+  tags: string[]
+}
+
+export async function listTemplates(): Promise<TemplateInfo[]> {
+  if (!existsSync(TEMPLATES_DIR)) return []
+  const out: (TemplateInfo & { order: number })[] = []
+  for (const id of await fs.readdir(TEMPLATES_DIR)) {
+    const f = path.join(TEMPLATES_DIR, id, "template.json")
+    if (!existsSync(f) || !existsSync(path.join(TEMPLATES_DIR, id, ENTRY))) continue
+    try {
+      const t = JSON.parse(await fs.readFile(f, "utf8"))
+      out.push({ id, name: t.name ?? id, description: t.description ?? "", tags: t.tags ?? [], order: t.order ?? 99 })
+    } catch {}
+  }
+  return out.sort((a, b) => a.order - b.order).map(({ order: _o, ...t }) => t)
+}
+
+async function copyTemplate(templateId: string, dir: string) {
+  if (!/^[a-z0-9][a-z0-9-]*$/.test(templateId) || !existsSync(path.join(TEMPLATES_DIR, templateId, ENTRY)))
+    throw new EdaError("template_not_found", `No template "${templateId}"`, "Call list_templates.")
+  const src = path.join(TEMPLATES_DIR, templateId)
+  async function walk(rel: string) {
+    for (const ent of await fs.readdir(path.join(src, rel), { withFileTypes: true })) {
+      if (ent.name === "template.json") continue
+      const r = path.join(rel, ent.name)
+      if (ent.isDirectory()) {
+        await fs.mkdir(path.join(dir, r), { recursive: true })
+        await walk(r)
+      } else await fs.copyFile(path.join(src, r), path.join(dir, r))
+    }
+  }
+  await walk("")
+}
+
+export async function createProject(opts: { name?: string; description?: string; code?: string; id?: string; template?: string }) {
+  let template: TemplateInfo | undefined
+  if (opts.template) {
+    template = (await listTemplates()).find((t) => t.id === opts.template)
+    if (!template) throw new EdaError("template_not_found", `No template "${opts.template}"`, "Call list_templates.")
+  }
+  const name = opts.name?.trim() || template?.name || "Untitled board"
   await fs.mkdir(PROJECTS_DIR, { recursive: true })
-  let id = opts.id ? slugify(opts.id) : slugify(opts.name)
+  let id = opts.id ? slugify(opts.id) : slugify(template && !opts.name ? template.id : name)
   const base = id
   for (let n = 2; existsSync(projectDir(id)); n++) id = `${base}-${n}`
   const dir = projectDir(id)
@@ -97,13 +146,14 @@ export async function createProject(opts: { name: string; description?: string; 
   const now = new Date().toISOString()
   const meta: ProjectMeta = {
     id,
-    name: opts.name,
-    description: opts.description ?? "",
+    name,
+    description: opts.description ?? template?.description ?? "",
     createdAt: now,
     updatedAt: now,
   }
   await fs.writeFile(path.join(dir, "aeda.json"), JSON.stringify(meta, null, 2))
-  await fs.writeFile(path.join(dir, ENTRY), opts.code ?? STARTER)
+  if (template) await copyTemplate(template.id, dir)
+  if (opts.code || !template) await fs.writeFile(path.join(dir, ENTRY), opts.code ?? STARTER)
   return meta
 }
 
@@ -127,10 +177,12 @@ export async function listProjects(): Promise<(ProjectMeta & { status?: string }
     if (!existsSync(metaFile)) continue
     try {
       const meta = JSON.parse(await fs.readFile(metaFile, "utf8"))
+      if (!meta || typeof meta !== "object") continue
       let status: string | undefined
       const reportFile = path.join(PROJECTS_DIR, name, ".aeda", "report.json")
       if (existsSync(reportFile)) status = JSON.parse(await fs.readFile(reportFile, "utf8")).status
-      out.push({ ...meta, status })
+      // The folder name is the id, whatever the file says.
+      out.push({ ...meta, id: name, status })
     } catch {}
   }
   return out.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
@@ -167,6 +219,12 @@ export async function readProjectFile(id: string, rel: string): Promise<string> 
 export async function writeProjectFile(id: string, rel: string, content: string) {
   requireProject(id)
   const full = safePath(id, rel)
+  // Not writable through the tools: project metadata, dotfiles, and files that would change how
+  // the design is executed when it is built (runtime config, package manifests, dependencies).
+  const inside = path.relative(projectDir(id), full)
+  const first = (inside.split(path.sep)[0] ?? "").toLowerCase()
+  if (first.startsWith(".") || first === "node_modules" || /^(aeda\.json|bunfig\.toml|package\.json|tsconfig\.json)$/i.test(inside))
+    throw new EdaError("bad_path", `"${rel}" is reserved and cannot be written`, "Design files are .tsx files (plus NOTES.md). The project name and description are changed in the app.")
   await fs.mkdir(path.dirname(full), { recursive: true })
   await fs.writeFile(full, content)
   await touchProject(id)
@@ -175,6 +233,8 @@ export async function writeProjectFile(id: string, rel: string, content: string)
 
 /** Exact-string replace, like an editor tool. Fails loudly when the match is missing or ambiguous. */
 export async function editProjectFile(id: string, rel: string, oldStr: string, newStr: string, replaceAll = false) {
+  if (oldStr === "")
+    throw new EdaError("edit_no_match", "old_string is empty", "Pass the exact text to replace; use write_file to replace the whole file.")
   const content = await readProjectFile(id, rel)
   const count = content.split(oldStr).length - 1
   if (count === 0)
@@ -211,7 +271,8 @@ export async function snapshot(id: string, message: string, status?: string): Pr
   const versions = await readVersions(id)
   const files = await listFiles(id)
   const payload: Record<string, string> = {}
-  for (const f of files) payload[f.path] = await fs.readFile(path.join(projectDir(id), f.path), "utf8")
+  // aeda.json only carries timestamps and the name; it is not part of the design.
+  for (const f of files) if (f.path !== "aeda.json") payload[f.path] = await fs.readFile(path.join(projectDir(id), f.path), "utf8")
   const serialized = JSON.stringify(payload)
   const histDir = path.join(buildDir(id), "history")
   await fs.mkdir(histDir, { recursive: true })
@@ -248,10 +309,55 @@ export async function restoreVersion(id: string, version: number) {
   }
   for (const [rel, content] of Object.entries(payload)) {
     if (rel === "aeda.json") continue
-    const full = path.join(dir, rel)
+    const full = safePath(id, rel)
     await fs.mkdir(path.dirname(full), { recursive: true })
     await fs.writeFile(full, content)
   }
   await touchProject(id)
   return { restored: version, files: Object.keys(payload).length }
+}
+
+
+// ---- structured placement edit ----------------------------------------------
+
+/**
+ * Set pcbX / pcbY / pcbRotation / layer on the JSX element whose name prop is `name`.
+ * Works on literal names (name="R1"). Parts generated in a loop have no single element to edit.
+ */
+export async function placeComponent(
+  id: string,
+  name: string,
+  place: { x?: number; y?: number; rotation?: number; layer?: "top" | "bottom" },
+) {
+  if (!/^[A-Za-z_][\w-]*$/.test(name)) throw new EdaError("bad_component_name", `"${name}" is not a valid designator`)
+  const files = (await listFiles(id)).filter((f) => /\.tsx$/.test(f.path) && !f.path.startsWith("lib/"))
+  // Brace groups and quoted strings are consumed whole, so a ">" inside a prop value can never close the tag.
+  const attrRun = `(?:\\{[^{}]*(?:\\{[^{}]*\\}[^{}]*)*\\}|"[^"]*"|'[^']*'|[^<>{}"'])*?`
+  const tagRe = new RegExp(`<([A-Za-z_][\\w.]*)(${attrRun}\\bname=(?:"${name}"|'${name}'|\\{"${name}"\\})${attrRun})(/?>)`)
+  for (const f of files) {
+    const source = await readProjectFile(id, f.path)
+    const m = source.match(tagRe)
+    if (!m) continue
+    let attrs = m[2]!
+    const setProp = (prop: string, value: string | undefined) => {
+      if (value === undefined) return
+      const re = new RegExp(`\\s${prop}=(?:\\{[^{}]*\\}|"[^"]*")`)
+      if (re.test(attrs)) attrs = attrs.replace(re, ` ${prop}=${value}`)
+      else attrs = attrs.replace(/\s*$/, "") + ` ${prop}=${value}` + (m[3] === "/>" ? " " : "")
+    }
+    const num = (n: number | undefined) => (n === undefined ? undefined : `{${Math.round(n * 1000) / 1000}}`)
+    setProp("pcbX", num(place.x))
+    setProp("pcbY", num(place.y))
+    setProp("pcbRotation", num(place.rotation))
+    setProp("layer", place.layer ? `"${place.layer}"` : undefined)
+    // Function form: "$" sequences in the attributes must not be read as replacement patterns.
+    const next = source.replace(m[0]!, () => `<${m[1]}${attrs}${m[3]}`)
+    await writeProjectFile(id, f.path, next)
+    return { component: name, element: m[1], file: f.path, ...place }
+  }
+  throw new EdaError(
+    "component_not_found",
+    `No element with name="${name}" in the design sources`,
+    "Only parts written with a literal name can be placed this way. For parts generated in a loop or inside a reusable component, edit the code.",
+  )
 }

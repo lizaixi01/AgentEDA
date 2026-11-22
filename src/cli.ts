@@ -109,14 +109,22 @@ async function main() {
       const key = rawKey!.replace(/-/g, "_")
       const schema = shape[key]
       const kind = schema ? typeName(schema) : "string"
-      if (kind === "boolean" && inline === undefined && (rest[i + 1] === undefined || rest[i + 1]!.startsWith("--"))) {
-        args[key] = true
+      if (kind === "boolean") {
+        // A bare flag is true. Only a literal true / false right after it is its value, so
+        // `build --detail my-board` keeps my-board as the positional project.
+        const next = inline ?? rest[i + 1]
+        const literal = next === undefined ? undefined : /^(true|1|yes|on)$/i.test(next) ? true : /^(false|0|no|off)$/i.test(next) ? false : undefined
+        args[key] = literal ?? true
+        if (literal !== undefined && inline === undefined) i++
       } else {
         const value = readValue(inline ?? rest[++i] ?? "")
-        args[key] = kind === "number" ? Number(value) : kind === "boolean" ? value !== "false" : value
+        // An empty value for a number is rejected by validation instead of silently becoming 0.
+        args[key] = kind === "number" ? (value.trim() === "" ? Number.NaN : Number(value)) : value
       }
     } else if ("project" in shape && args.project === undefined) {
       args.project = a
+    } else if ("category" in shape && args.category === undefined) {
+      args.category = a
     } else if ("query" in shape && args.query === undefined) {
       args.query = a
     } else if ("name" in shape && args.name === undefined) {

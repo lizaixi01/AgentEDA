@@ -1,0 +1,15 @@
+#!/bin/sh
+# AgentEDA command line. Symlink this file onto your PATH, e.g.
+#   ln -s "$(pwd)/bin/aeda" /usr/local/bin/aeda
+# Resolves its own location through symlinks so it can find the repo.
+SELF="$0"
+while [ -L "$SELF" ]; do
+  LINK="$(readlink "$SELF")"
+  case "$LINK" in
+    /*) SELF="$LINK" ;;
+    *) SELF="$(dirname "$SELF")/$LINK" ;;
+  esac
+done
+ROOT="$(cd "$(dirname "$SELF")/.." && pwd)"
+BUN="$(command -v bun || echo "$HOME/.bun/bin/bun")"
+exec "$BUN" "$ROOT/src/cli.ts" "$@"

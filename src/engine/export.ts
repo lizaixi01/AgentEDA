@@ -13,7 +13,7 @@ import {
   convertCircuitJsonToExcellonDrillCommands,
   stringifyExcellonDrill,
 } from "circuit-json-to-gerber"
-import { convertCircuitJsonToPickAndPlaceCsv } from "circuit-json-to-pnp-csv"
+import { convertCircuitJsonToPickAndPlaceCsv, convertCircuitJsonToPickAndPlaceRows } from "circuit-json-to-pnp-csv"
 import { CircuitJsonToKicadPcbConverter, CircuitJsonToKicadSchConverter } from "circuit-json-to-kicad"
 import { buildDir, EdaError } from "./project"
 import { readCircuitJson, readReport } from "./build"
@@ -39,7 +39,71 @@ export interface ExportResult {
   dir: string
   files: { name: string; bytes: number; description: string }[]
   blockers: string[]
+  verification: GerberVerification
   order: { board: string; steps: string[] }
+}
+
+export interface GerberVerification {
+  ok: boolean
+  parser: string
+  layers: { file: string; type: string | null; side: string | null }[]
+  missing: string[]
+  /** Board size as read back from the outline layer, mm */
+  sizeMm: { width: number; height: number } | null
+  sizeMatchesDesign: boolean | null
+  previews: string[]
+  note?: string
+}
+
+const REQUIRED_LAYERS: [string, string][] = [
+  ["copper", "top"],
+  ["copper", "bottom"],
+  ["soldermask", "top"],
+  ["soldermask", "bottom"],
+  ["outline", "all"],
+]
+
+async function verifyGerbers(id: string, zip: JSZip, board: { widthMm: number; heightMm: number } | null): Promise<GerberVerification> {
+  const previewDir = path.join(buildDir(id), "fab-preview")
+  await fs.rm(previewDir, { recursive: true, force: true })
+  try {
+    const { default: pcbStackup } = (await import("pcb-stackup")) as any
+    const inputs: { filename: string; gerber: string }[] = []
+    for (const [filename, file] of Object.entries(zip.files)) inputs.push({ filename, gerber: await file.async("string") })
+    const stackup = await pcbStackup(inputs)
+    const layers = stackup.layers.map((l: any) => ({ file: l.filename, type: l.type ?? null, side: l.side ?? null }))
+    const missing = REQUIRED_LAYERS.filter(([type, side]) => !layers.some((l: any) => l.type === type && l.side === side)).map(
+      ([type, side]) => `${type}/${side}`,
+    )
+    const toMm = (v: number) => (stackup.top.units === "in" ? v * 25.4 : v)
+    const sizeMm =
+      typeof stackup.top.width === "number" ? { width: Math.round(toMm(stackup.top.width) * 100) / 100, height: Math.round(toMm(stackup.top.height) * 100) / 100 } : null
+    const sizeMatchesDesign =
+      sizeMm && board ? Math.abs(sizeMm.width - board.widthMm) < 0.5 && Math.abs(sizeMm.height - board.heightMm) < 0.5 : null
+    await fs.mkdir(previewDir, { recursive: true })
+    await fs.writeFile(path.join(previewDir, "top.svg"), stackup.top.svg)
+    await fs.writeFile(path.join(previewDir, "bottom.svg"), stackup.bottom.svg)
+    return {
+      ok: missing.length === 0 && sizeMatchesDesign !== false,
+      parser: "tracespace pcb-stackup",
+      layers,
+      missing,
+      sizeMm,
+      sizeMatchesDesign,
+      previews: [".aeda/fab-preview/top.svg", ".aeda/fab-preview/bottom.svg"],
+    }
+  } catch (e: any) {
+    return {
+      ok: false,
+      parser: "tracespace pcb-stackup",
+      layers: [],
+      missing: [],
+      sizeMm: null,
+      sizeMatchesDesign: null,
+      previews: [],
+      note: `Gerber read-back failed: ${e?.message ?? e}`,
+    }
+  }
 }
 
 export async function exportFab(id: string, opts: { force?: boolean } = {}): Promise<ExportResult> {
@@ -67,7 +131,8 @@ export async function exportFab(id: string, opts: { force?: boolean } = {}): Pro
   const zip = new JSZip()
   const layers = stringifyGerberCommandLayers(convertCircuitJsonToGerberCommands(circuitJson as any)) as Record<string, string>
   for (const [layer, content] of Object.entries(layers)) {
-    const ext = GERBER_EXT[layer]
+    const inner = /^In(\d+)_Cu$/.exec(layer)
+    const ext = GERBER_EXT[layer] ?? (inner ? `G${inner[1]}` : undefined)
     if (!ext) continue // fab notes etc. are not sent to the fab
     zip.file(`${id}.${ext}`, content)
   }
@@ -80,12 +145,29 @@ export async function exportFab(id: string, opts: { force?: boolean } = {}): Pro
       if (/^T\d+C/m.test(drill) && /^X-?\d/m.test(drill)) zip.file(`${id}-${plated ? "PTH" : "NPTH"}.DRL`, drill)
     } catch {}
   }
-  await put("gerbers.zip", await zip.generateAsync({ type: "uint8array" }), "Gerber + drill files. Upload to JLCPCB as the PCB file.")
+  await put("gerbers.zip", await zip.generateAsync({ type: "uint8array", compression: "DEFLATE", compressionOptions: { level: 6 } }), "Gerber + drill files. Upload to JLCPCB as the PCB file.")
+
+  // Read the Gerbers back with an independent parser. This is the check that what we are about
+  // to hand the fab is well-formed, has every layer, and is the size the design says it is.
+  const verification = await verifyGerbers(id, zip, report.summary.board)
+  // Every copper layer of the board must be in the archive, inner layers included.
+  const copperWritten = Object.keys(zip.files).filter((f) => /\.(GTL|GBL|G\d+)$/.test(f)).length
+  const copperWanted = report.summary.board?.layers ?? 2
+  if (copperWritten < copperWanted) {
+    verification.ok = false
+    verification.missing.push(`copper layers (board has ${copperWanted}, archive has ${copperWritten})`)
+  }
 
   // BOM (grouped, JLCPCB column names)
   const bomRows = [["Comment", "Designator", "Footprint", "JLCPCB Part #"].map(csvCell).join(",")]
-  for (const line of report.bom)
-    bomRows.push([line.value || line.mpn || line.kind, line.designators.join(","), line.footprint, line.lcsc ?? ""].map(csvCell).join(","))
+  // The BOM and the placement list must name the same parts, or the assembly order is rejected:
+  // a part the placement list leaves out (do-not-place) is left out here too.
+  const placed = new Set((convertCircuitJsonToPickAndPlaceRows(circuitJson as any) as any[]).map((r) => String(r.designator)))
+  for (const line of report.bom) {
+    const designators = line.designators.filter((d) => placed.has(d))
+    if (!designators.length) continue
+    bomRows.push([line.value || line.mpn || line.kind, designators.join(","), line.footprint, line.lcsc ?? ""].map(csvCell).join(","))
+  }
   await put("bom.csv", bomRows.join("\n") + "\n", "Bill of materials for JLCPCB assembly.")
 
   // CPL / pick and place
@@ -101,6 +183,15 @@ export async function exportFab(id: string, opts: { force?: boolean } = {}): Pro
     await put(`${id}.kicad_sch`, sch.getOutputString(), "KiCad schematic.")
   } catch (e: any) {
     // interchange is best-effort; fab files above are what matters
+  }
+
+  // Mechanical hand-off: the assembled board as a STEP solid for enclosure design in a CAD tool.
+  try {
+    const { circuitJsonToStep } = (await import("circuit-json-to-step")) as any
+    const step: string = await circuitJsonToStep(circuitJson, { includeComponents: true })
+    if (typeof step === "string" && step.startsWith("ISO-10303-21")) await put(`${id}.step`, step, "3D STEP model of the assembled board, for mechanical CAD (enclosure design).")
+  } catch {
+    // best-effort: fab files do not depend on it
   }
 
   await put("circuit.json", JSON.stringify(circuitJson), "Circuit JSON (tscircuit interchange).")
@@ -125,13 +216,15 @@ export async function exportFab(id: string, opts: { force?: boolean } = {}): Pro
     ``,
   ].join("\n")
   bundle.file("README.md", readme)
-  await put(`${id}-fab.zip`, await bundle.generateAsync({ type: "uint8array" }), "Everything above in one archive.")
+  await put(`${id}-fab.zip`, await bundle.generateAsync({ type: "uint8array", compression: "DEFLATE", compressionOptions: { level: 6 } }), "Everything above in one archive.")
 
+  await fs.writeFile(path.join(buildDir(id), "fab-verification.json"), JSON.stringify(verification, null, 2))
   return {
     project: id,
     dir: path.relative(process.cwd(), fabDir) || fabDir,
     files,
     blockers,
+    verification,
     order: {
       board: b ? `${b.widthMm} x ${b.heightMm} mm, ${b.layers} layers` : "unknown",
       steps: [

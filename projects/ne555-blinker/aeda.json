@@ -1,0 +1,7 @@
+{
+  "id": "ne555-blinker",
+  "name": "555 闪烁灯",
+  "description": "NE555 无稳态多谐振荡器，约 1.4Hz 闪烁 LED，5V 排针供电。",
+  "createdAt": "2026-11-21T18:51:47.765Z",
+  "updatedAt": "2026-11-22T02:53:28.120Z"
+}

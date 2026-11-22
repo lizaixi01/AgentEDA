@@ -1,0 +1,7 @@
+{
+  "id": "esp32-c3-dev-board",
+  "name": "ESP32-C3 dev board",
+  "description": "ESP32-C3-MINI-1 最小系统板：USB-C 供电和下载，3.3V LDO，复位和 BOOT 按键，状态 LED，两排排针引出 GPIO",
+  "createdAt": "2026-11-21T18:48:25.775Z",
+  "updatedAt": "2026-11-22T02:50:49.404Z"
+}

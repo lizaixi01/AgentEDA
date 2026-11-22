@@ -1,0 +1,1 @@
+{ "name": "ESP32-C3 开发板", "description": "ESP32-C3-MINI-1 最小系统：USB-C 供电与下载，3.3V LDO，复位 / BOOT 按键，状态灯，两排排针引出 GPIO，底层铺地。", "tags": ["MCU", "Wi-Fi", "蓝牙"], "order": 2 }

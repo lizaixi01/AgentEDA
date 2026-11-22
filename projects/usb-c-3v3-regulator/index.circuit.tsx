@@ -15,7 +15,7 @@ export default () => (
     <capacitor name="C1" capacitance="10uF" footprint="0805" />
     <capacitor name="C2" capacitance="10uF" footprint="0805" />
     <resistor name="R3" resistance="1k" footprint="0402" />
-    <led name="D1" color="green" footprint="0603" />
+    <led name="D1" color="red" footprint="0603" supplierPartNumbers={{ jlcpcb: ["C2286"] }} />
     <pinheader name="J2" pinCount={2} pitch="2.54mm" pinLabels={["V3_3", "GND"]} pcbX={12} pcbY={0} pcbRotation={90} />
 
     <trace from="J1.VBUS1" to="net.VBUS" />

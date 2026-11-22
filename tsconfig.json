@@ -27,4 +27,7 @@
     "noUnusedParameters": false,
     "noPropertyAccessFromIndexSignature": false
   }
+,
+  "include": ["src"],
+  "exclude": ["scratch", "web", "projects", "node_modules"]
 }

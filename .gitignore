@@ -6,3 +6,9 @@ projects/*/.aeda/
 web/dist
 web/node_modules
 *.log
+.cache/
+projects/
+
+# machine-specific (absolute paths)
+.mcp.json
+.claude/launch.json

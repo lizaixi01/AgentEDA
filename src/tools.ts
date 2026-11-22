@@ -14,7 +14,9 @@ import {
   editProjectFile,
   listFiles,
   listProjects,
+  listTemplates,
   listVersions,
+  placeComponent,
   readMeta,
   readProjectFile,
   restoreVersion,
@@ -24,10 +26,18 @@ import {
 } from "./engine/project"
 import { buildProject, compactReport, readReport, type BuildProgress } from "./engine/build"
 import { exportFab, export3d } from "./engine/export"
-import { importPart, searchParts } from "./engine/parts"
+import { exportReport } from "./engine/report"
+import { PART_CATEGORIES, browseParts, importPart, searchParts } from "./engine/parts"
+import path from "node:path"
+import fs from "node:fs/promises"
+import { renderPng } from "./engine/render"
+import { buildDir } from "./engine/project"
 import { GUIDE } from "./guide"
+import { logActivity } from "./engine/activity"
 
 export interface ToolContext {
+  /** Which interface the call came through; recorded in the project's activity feed */
+  source?: "cli" | "mcp" | "http" | "agent" | "web"
   onProgress?: (p: BuildProgress) => void
   /** Notified after anything that changes what the UI should show */
   onChange?: (project: string, kind: "files" | "build" | "export" | "project") => void
@@ -67,18 +77,33 @@ export const tools: ToolDef<any>[] = [
     handler: async () => ({ projects: await listProjects() }),
   }),
   def({
+    name: "list_templates",
+    title: "List templates",
+    description: "List ready-made, verified board designs that can be used as a starting point (create_project with template).",
+    shape: {},
+    readOnly: true,
+    handler: async () => ({ templates: await listTemplates() }),
+  }),
+  def({
     name: "create_project",
     title: "Create project",
-    description: `Create a new PCB project. Optionally pass the full ${ENTRY} source as \`code\`; otherwise a starter LED board is written. Returns the project id. Follow with build.`,
+    description: `Create a new PCB project. Pass the full ${ENTRY} source as \`code\`, or a \`template\` id to start from a verified design; otherwise a starter LED board is written. Returns the project id. Follow with build.`,
     shape: {
-      name: z.string().describe("Human-readable project name, e.g. 'USB-C LED torch'"),
+      name: z.string().optional().describe("Human-readable project name, e.g. 'USB-C LED torch'. Optional when a template is given"),
+      template: z.string().optional().describe("Start from a verified template (id from list_templates) instead of the starter board"),
       description: z.string().optional().describe("What the board is for; the product requirement in one or two sentences"),
       code: z.string().optional().describe(`Initial contents of ${ENTRY}`),
     },
     handler: async (a, ctx) => {
+      if (!a.name && !a.template) throw new EdaError("invalid_arguments", "Give a name or a template")
       const meta = await createProject(a)
       ctx.onChange?.(meta.id, "project")
-      return { project: meta.id, entry: ENTRY, next: "Write the design to the entry file (write_file), then call build." }
+      return {
+        project: meta.id,
+        name: meta.name,
+        entry: ENTRY,
+        next: a.template ? "Call build, then read_file to see the design." : "Write the design to the entry file (write_file), then call build.",
+      }
     },
   }),
   def({
@@ -144,6 +169,27 @@ export const tools: ToolDef<any>[] = [
     },
   }),
   def({
+    name: "place_component",
+    title: "Place component",
+    description:
+      "Set a part's PCB position without rewriting code: updates pcbX / pcbY (mm, board centre is 0,0), pcbRotation (degrees) and layer on the element with that name. Give only the fields you want to change. Call build afterwards. Positions of placed parts are in build's detail output (components[].x/y/rotation).",
+    shape: {
+      project,
+      name: z.string().describe("Designator, e.g. U1, C3, J2"),
+      x: z.number().optional().describe("pcbX in mm"),
+      y: z.number().optional().describe("pcbY in mm"),
+      rotation: z.number().optional().describe("pcbRotation in degrees"),
+      layer: z.enum(["top", "bottom"]).optional(),
+    },
+    handler: async (a, ctx) => {
+      if (a.x === undefined && a.y === undefined && a.rotation === undefined && a.layer === undefined)
+        throw new EdaError("invalid_arguments", "Give at least one of x, y, rotation, layer")
+      const r = await placeComponent(a.project, a.name, { x: a.x, y: a.y, rotation: a.rotation, layer: a.layer })
+      ctx.onChange?.(a.project, "files")
+      return { ...r, next: "Call build to re-route with the new placement." }
+    },
+  }),
+  def({
     name: "build",
     title: "Build and check",
     description:
@@ -151,7 +197,7 @@ export const tools: ToolDef<any>[] = [
     shape: {
       project,
       detail: z.boolean().optional().describe("Also return full component list (with pin names and placed positions), netlist and BOM"),
-      no_parts: z.boolean().optional().describe("Skip the online JLCPCB part lookup (faster, offline)"),
+      no_parts: z.boolean().optional().describe("Skip the online JLCPCB part lookup (faster, offline). Do not use with <connector standard=...> or jlcpcb: footprints, which need the lookup"),
       message: z.string().optional().describe("Short label for this version in the history, e.g. 'add USB-C connector'"),
     },
     handler: async (a, ctx) => {
@@ -187,6 +233,22 @@ export const tools: ToolDef<any>[] = [
     handler: async (a) => searchParts({ query: a.query, package: a.package, limit: a.limit, basicOnly: a.basic_only }),
   }),
   def({
+    name: "browse_parts",
+    title: "Browse parts by category",
+    description:
+      `List in-stock JLCPCB parts of one category with their attributes, best (basic, deep stock) first. Use this when you know the kind of part but not a part number, e.g. a green 0603 LED, a 2-pin JST PH socket, a 3.3 V LDO, a slide switch. \`where\` filters on exact attribute values ("color=green", "num_pins=2,pitch_mm=2"); \`contains\` filters on words in the part number / description. The result lists \`filterableAttributes\` for the category. Categories: ${PART_CATEGORIES.join(", ")}.`,
+    shape: {
+      category: z.string().describe("One of the categories listed in the description"),
+      package: z.string().optional().describe("Exact package, e.g. 0603, SOT-23, SOT-223"),
+      where: z.string().optional().describe('Exact attribute filters as "key=value,key=value"'),
+      contains: z.string().optional().describe("Words that must appear in the part number or description"),
+      basic_only: z.boolean().optional(),
+      limit: z.number().int().min(1).max(40).optional(),
+    },
+    readOnly: true,
+    handler: async (a) => browseParts({ category: a.category, package: a.package, where: a.where, contains: a.contains, basicOnly: a.basic_only, limit: a.limit }),
+  }),
+  def({
     name: "import_part",
     title: "Import part",
     description:
@@ -202,12 +264,43 @@ export const tools: ToolDef<any>[] = [
     name: "export_fab",
     title: "Export manufacturing files",
     description:
-      "Produce the JLCPCB order files from the last build: gerbers.zip, bom.csv, cpl.csv, plus KiCad files and one bundle zip. Refuses if the last build has errors unless force is set.",
+      "Produce the JLCPCB order files from the last build: gerbers.zip, bom.csv, cpl.csv, plus a STEP 3D model for mechanical CAD, KiCad files and one bundle zip. Refuses if the last build has errors unless force is set.",
     shape: { project, force: z.boolean().optional() },
     handler: async (a, ctx) => {
       const r = await exportFab(a.project, { force: a.force })
       ctx.onChange?.(a.project, "export")
       return r
+    },
+  }),
+  def({
+    name: "render",
+    title: "Render view to PNG",
+    description:
+      "Rasterise a view of the last build to a PNG file and return its path, so you can look at the board: 'pcb' (copper, pads, silkscreen), 'schematic', 'assembly', or 'simulation' (waveforms). Open the returned file with your image-reading tool. (Over MCP this tool returns the image directly.)",
+    shape: {
+      project,
+      view: z.enum(["pcb", "schematic", "assembly", "simulation"]).optional().describe("Default: pcb"),
+      width: z.number().int().min(300).max(2400).optional().describe("Image width in px, default 1000"),
+    },
+    readOnly: true,
+    handler: async (a) => {
+      const view = a.view ?? "pcb"
+      const png = await renderPng(a.project, view, a.width ?? 1000)
+      const file = path.join(buildDir(a.project), `render-${view}.png`)
+      await fs.writeFile(file, png)
+      return { view, file, bytes: png.byteLength, note: "Board centre is (0,0); +x is right, +y is up. Red = top copper, blue = bottom copper, yellow = silkscreen." }
+    },
+  }),
+  def({
+    name: "export_report",
+    title: "Export design report",
+    description:
+      "Write a self-contained HTML design report for human review (PCB and schematic images, design notes from NOTES.md, checks, manufacturability table, BOM, netlist, simulation). One offline file to send to a reviewer. Returns its path.",
+    shape: { project },
+    handler: async (a, ctx) => {
+      const r = await exportReport(a.project)
+      ctx.onChange?.(a.project, "export")
+      return { ...r, next: "Give the file path to the user; it opens in any browser." }
     },
   }),
   def({
@@ -240,6 +333,27 @@ export const tools: ToolDef<any>[] = [
 
 export const toolByName = new Map(tools.map((t) => [t.name, t]))
 
+/**
+ * Tools an agent gets when it is bound to one project (the built-in chat agent, and the MCP
+ * server in pinned mode). The `project` argument is filled in for it.
+ */
+export const PROJECT_AGENT_TOOLS = [
+  "read_file",
+  "write_file",
+  "edit_file",
+  "place_component",
+  "list_files",
+  "build",
+  "get_report",
+  "search_parts",
+  "browse_parts",
+  "import_part",
+  "export_fab",
+  "export_report",
+  "list_versions",
+  "restore_version",
+] as const
+
 /** Uniform call wrapper: validates args, converts thrown errors into a structured error object. */
 export async function callTool(name: string, args: unknown, ctx: ToolContext = {}): Promise<{ ok: boolean; result: any }> {
   const tool = toolByName.get(name)
@@ -260,10 +374,68 @@ export async function callTool(name: string, args: unknown, ctx: ToolContext = {
         },
       },
     }
+  const started = Date.now()
+  let out: { ok: boolean; result: any }
   try {
-    return { ok: true, result: await tool.handler(parsed.data, ctx) }
+    out = { ok: true, result: await tool.handler(parsed.data, ctx) }
   } catch (e: any) {
-    if (e instanceof EdaError) return { ok: false, result: { error: { code: e.code, message: e.message, hint: e.hint } } }
-    return { ok: false, result: { error: { code: "internal_error", message: String(e?.message ?? e) } } }
+    if (e instanceof EdaError) out = { ok: false, result: { error: { code: e.code, message: e.message, hint: e.hint } } }
+    else
+      out = {
+        ok: false,
+        result: {
+          error: {
+            code: "internal_error",
+            message: String(e?.message ?? e),
+            hint: "This is a fault in the tool or its environment, not in your design. Retry once; if it repeats, report the message to the user.",
+          },
+        },
+      }
+  }
+  const projectId = (parsed.data as any).project ?? out.result?.project
+  if (typeof projectId === "string" && !tool.readOnly && name !== "delete_project")
+    await logActivity(projectId, {
+      source: ctx.source ?? "cli",
+      tool: name,
+      ok: out.ok,
+      summary: summarize(name, parsed.data, out),
+      durationMs: Date.now() - started,
+    })
+  return out
+}
+
+/** One-line, human-readable description of what a tool call did (shown in the UI activity feed). */
+export function summarize(name: string, args: any, out: { ok: boolean; result: any }): string {
+  const r = out.result
+  if (!out.ok) return `${r?.error?.code ?? "error"}: ${String(r?.error?.message ?? "").slice(0, 140)}`
+  switch (name) {
+    case "create_project":
+      return `Created project ${r.project}`
+    case "write_file":
+      return `Wrote ${r.path} (${r.bytes} bytes)`
+    case "edit_file":
+      return `Edited ${r.path}`
+    case "place_component":
+      return `Moved ${r.component}${r.x !== undefined || r.y !== undefined ? ` to (${r.x ?? "="}, ${r.y ?? "="})` : ""}${r.rotation !== undefined ? ` rot ${r.rotation}°` : ""}${r.layer ? ` on ${r.layer}` : ""}`
+    case "build": {
+      const s = r.summary
+      return r.status === "compile_failed"
+        ? `Build v${r.version}: compile failed`
+        : `Build v${r.version}: ${r.ok ? "passed" : "failed"}, ${s.errors} errors, ${s.warnings} warnings, routed ${s.connectionsRouted}/${s.connectionsTotal}`
+    }
+    case "import_part":
+      return `Imported ${r.mpn} (${r.lcsc}) as ${r.component}`
+    case "search_parts":
+      return `Searched parts "${args.query}": ${r.count} hits`
+    case "export_fab":
+      return `Exported ${r.files.length} manufacturing files`
+    case "export_report":
+      return "Exported design report"
+    case "export_3d":
+      return `Exported 3D model`
+    case "restore_version":
+      return `Restored version ${r.restored}`
+    default:
+      return name
   }
 }

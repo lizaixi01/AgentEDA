@@ -1,0 +1,1 @@
+{ "name": "RC 低通滤波器（带仿真）", "description": "一阶 RC 低通，截止频率约 1 kHz。自带 SPICE 测试台：1 kHz 方波输入，对比输入输出波形。", "tags": ["模拟", "仿真"], "order": 4 }

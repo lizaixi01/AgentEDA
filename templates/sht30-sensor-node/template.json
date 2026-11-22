@@ -1,0 +1,1 @@
+{ "name": "温湿度传感器小板", "description": "SHT30 I2C 温湿度传感器，3.3V 供电，SDA / SCL 上拉，4 针排针引出，底层铺地。", "tags": ["传感器", "I2C"], "order": 6 }

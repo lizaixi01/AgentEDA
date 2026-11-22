@@ -1,0 +1,1 @@
+{ "name": "RP2040 最小系统板", "description": "由测试 Agent 从零完成：RP2040 + W25Q128 Flash + 12MHz 晶振，USB-C，3.3V LDO，BOOTSEL / 复位按键，29 个 GPIO 引出。122 条连接全部布通；电气细节未经人工复核。", "tags": ["MCU", "Agent 作品"], "order": 8 }

@@ -19,6 +19,10 @@ export function zodToJsonSchema(shape: z.ZodRawShape) {
         if (c.kind === "max") prop.maximum = c.value
       }
     } else if (t === "ZodBoolean") prop.type = "boolean"
+    else if (t === "ZodEnum") {
+      prop.type = "string"
+      prop.enum = s._def.values
+    }
     else prop.type = "string"
     const desc = description ?? s.description
     if (desc) prop.description = desc
