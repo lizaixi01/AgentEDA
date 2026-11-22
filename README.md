@@ -161,3 +161,7 @@ bun scripts/mock-llm.ts
 ## 基于
 
 [tscircuit](https://github.com/tscircuit/tscircuit)（MIT）提供电路编译、自动布线和导出；器件数据来自 [jlcsearch](https://github.com/tscircuit/jlcsearch) 与 EasyEDA。
+
+## 许可证
+
+[MIT](LICENSE)。
